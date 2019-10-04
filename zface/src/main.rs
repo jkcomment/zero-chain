@@ -8,23 +8,18 @@ extern crate serde_derive;
 #[macro_use]
 extern crate matches;
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::io::{BufWriter, Write, BufReader, Read};
+use std::path::PathBuf;
 use clap::{Arg, App, SubCommand, AppSettings, ArgMatches};
 use rand::{OsRng, Rng};
 use proofs::{
-    EncryptionKey, ProofGenerationKey, SpendingKey, DecryptionKey,
-    elgamal,
-    Transaction,
-    setup,
-    PARAMS,
+    EncryptionKey, SpendingKey, DecryptionKey,
+    elgamal, MultiEncKeys, anonymous_setup,
+    confidential_setup, PARAMS, KeyContext, ProofBuilder,
+    Confidential,
     };
 use primitives::{hexdisplay::{HexDisplay, AsBytesRef}, crypto::Ss58Codec};
 use pairing::bls12_381::Bls12;
-
-use bellman::groth16::{Parameters, PreparedVerifyingKey};
-use polkadot_rs::{Api, Url, hexstr_to_u64};
+use polkadot_rs::{Api, Url};
 use bip39::{Mnemonic, Language, MnemonicType};
 
 mod utils;
@@ -34,12 +29,12 @@ mod transaction;
 pub mod derive;
 pub mod term;
 pub mod ss58;
+pub mod error;
 use self::ss58::EncryptionKeyBytes;
 use self::utils::*;
 use self::config::*;
 use self::wallet::commands::*;
 use self::transaction::*;
-
 
 fn main() {
     let default_root_dir = get_default_root_dir();
@@ -64,7 +59,7 @@ fn main() {
     let rng = &mut OsRng::new().expect("should be able to construct RNG");
 
     match matches.subcommand() {
-        (SNARK_COMMAND, Some(matches)) => subcommand_snark(term, matches),
+        (SNARK_COMMAND, Some(matches)) => subcommand_snark(term, matches, rng),
         (WALLET_COMMAND, Some(matches)) => subcommand_wallet(term, root_dir, matches, rng),
         (TX_COMMAND, Some(matches)) => subcommand_tx(term, root_dir, matches, rng),
         (DEBUG_COMMAND, Some(matches)) => subcommand_debug(term, matches, rng),
@@ -81,43 +76,42 @@ fn main() {
 
 const SNARK_COMMAND: &'static str = "snark";
 
-fn subcommand_snark(mut term: term::Term, matches: &ArgMatches) {
+fn snark_arg_confidential_setup_match<'a, R: Rng>(matches: &ArgMatches<'a>, rng: &mut R) {
+    println!("Performing setup for confidential transfer...");
+    let pk_path = matches.value_of("proving-key-path").unwrap();
+    let vk_path = matches.value_of("verification-key-path").unwrap();
+
+    confidential_setup(rng)
+        .write_to_file(pk_path, vk_path)
+        .unwrap();
+
+    println!("Success! Output >> 'conf_pk.dat' and 'conf_vk.dat'");
+}
+
+fn snark_arg_anonymous_setup_match<'a, R: Rng>(matches: &ArgMatches<'a>, rng: &mut R) {
+    println!("Performing setup for anonymous transfer...");
+    let pk_path = matches.value_of("proving-key-path").unwrap();
+    let vk_path = matches.value_of("verification-key-path").unwrap();
+
+    anonymous_setup(rng)
+        .write_to_file(pk_path, vk_path)
+        .unwrap();
+
+    println!("Success! Output >> 'anony_pk.dat' and 'anony_vk.dat'");
+}
+
+fn subcommand_snark<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mut R) {
     match matches.subcommand() {
         ("setup", Some(matches)) => {
-            println!("Performing setup...");
-
-            let pk_path = Path::new(matches.value_of("proving-key-path").unwrap());
-            let vk_path = Path::new(matches.value_of("verification-key-path").unwrap());
-
-            let pk_file = File::create(&pk_path)
-                .map_err(|why| format!("couldn't create {}: {}", pk_path.display(), why)).unwrap();
-            let vk_file = File::create(&vk_path)
-                .map_err(|why| format!("couldn't create {}: {}", vk_path.display(), why)).unwrap();
-
-            let mut bw_pk = BufWriter::new(pk_file);
-            let mut bw_vk = BufWriter::new(vk_file);
-
-            let (proving_key, prepared_vk) = setup();
-            let mut v_pk = vec![];
-            let mut v_vk = vec![];
-
-            proving_key.write(&mut &mut v_pk).unwrap();
-            prepared_vk.write(&mut &mut v_vk).unwrap();
-
-            bw_pk.write(&v_pk[..])
-                .map_err(|_| "Unable to write proving key data to file.".to_string()).unwrap();
-
-            bw_vk.write(&v_vk[..])
-                .map_err(|_| "Unable to write verification key data to file.".to_string()).unwrap();
-
-            bw_pk.flush()
-                .map_err(|_| "Unable to flush proving key buffer.".to_string()).unwrap();
-
-            bw_vk.flush()
-                .map_err(|_| "Unable to flush verification key buffer.".to_string()).unwrap();
-
-            println!("Success! Output >> 'proving.params' and 'verification.params'");
+            snark_arg_confidential_setup_match(matches, rng);
+            snark_arg_anonymous_setup_match(matches, rng);
         },
+        ("confidential-setup", Some(matches)) => {
+            snark_arg_confidential_setup_match(matches, rng);
+        },
+        ("anonymous-setup", Some(matches)) => {
+            snark_arg_anonymous_setup_match(matches, rng);
+        }
         _ => {
             term.error(matches.usage()).unwrap();
             ::std::process::exit(1)
@@ -137,7 +131,7 @@ fn snark_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .value_name("FILE")
                 .takes_value(true)
                 .required(false)
-                .default_value(PROVING_KEY_PATH)
+                .default_value(CONF_PK_PATH)
             )
             .arg(Arg::with_name("verification-key-path")
                 .short("v")
@@ -146,7 +140,67 @@ fn snark_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .value_name("FILE")
                 .takes_value(true)
                 .required(false)
-                .default_value(VERIFICATION_KEY_PATH)
+                .default_value(CONF_VK_PATH)
+            )
+             .arg(Arg::with_name("proving-key-path")
+                .short("p")
+                .long("proving-key-path")
+                .help("Path of the generated proving key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(ANONY_PK_PATH)
+            )
+            .arg(Arg::with_name("verification-key-path")
+                .short("v")
+                .long("verification-key-path")
+                .help("Path of the generated verification key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(ANONY_VK_PATH)
+            )
+        )
+        .subcommand(SubCommand::with_name("confidential-setup")
+            .about("Performs a trusted setup for a given constraint system")
+            .arg(Arg::with_name("proving-key-path")
+                .short("p")
+                .long("proving-key-path")
+                .help("Path of the generated proving key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(CONF_PK_PATH)
+            )
+            .arg(Arg::with_name("verification-key-path")
+                .short("v")
+                .long("verification-key-path")
+                .help("Path of the generated verification key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(CONF_VK_PATH)
+            )
+        )
+        .subcommand(SubCommand::with_name("anonymous-setup")
+            .about("Performs a trusted setup for a given constraint system")
+            .arg(Arg::with_name("proving-key-path")
+                .short("p")
+                .long("proving-key-path")
+                .help("Path of the generated proving key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(ANONY_PK_PATH)
+            )
+            .arg(Arg::with_name("verification-key-path")
+                .short("v")
+                .long("verification-key-path")
+                .help("Path of the generated verification key file")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+                .default_value(ANONY_VK_PATH)
             )
         )
 }
@@ -195,27 +249,40 @@ fn subcommand_wallet<R: Rng>(mut term: term::Term, root_dir: PathBuf, matches: &
                 .expect("Invalid mnemonic to recover keystore.");
         },
         ("balance", Some(sub_matches)) => {
-            println!("Getting encrypted balance from zerochain");
-            // let url = Url::Custom("ws://0.0.0.0:9944".to_string());
+            println!("Getting encrypted balance...");
             let api = Api::init(tx_arg_url_match(&sub_matches));
 
             let dec_key = load_dec_key(&mut term, root_dir)
                 .expect("loading decrption key failed.");
 
-            let balance_query = BalanceQuery::get_encrypted_balance(&dec_key, api);
+            let balance_query = getter::BalanceQuery::get_encrypted_balance(&dec_key, api)
+                .expect("Falid to get balance data.");
 
             println!("Decrypted balance: {}", balance_query.decrypted_balance);
             println!("Encrypted balance: {}", balance_query.encrypted_balance_str);
             println!("Encrypted pending transfer: {}", balance_query.pending_transfer_str);
         },
         ("asset-balance", Some(sub_matches)) => {
-            println!("Getting encrypted asset from zerochain");
+            println!("Getting encrypted asset...");
             let api = Api::init(tx_arg_url_match(&sub_matches));
             let dec_key = load_dec_key(&mut term, root_dir)
                 .expect("loading decrption key failed.");
             let asset_id = wallet_arg_id_match(&sub_matches);
 
-            let balance_query = BalanceQuery::get_encrypted_asset(asset_id, &dec_key, api);
+            let balance_query = getter::BalanceQuery::get_encrypted_asset(asset_id, &dec_key, api)
+                .expect("Falid to get balance data.");;
+
+            println!("Decrypted balance: {}", balance_query.decrypted_balance);
+            println!("Encrypted balance: {}", balance_query.encrypted_balance_str);
+            println!("Encrypted pending transfer: {}", balance_query.pending_transfer_str);
+        },
+        ("anonymous-balance", Some(sub_matches)) => {
+            println!("Getting anonymous balance...");
+            let api = Api::init(tx_arg_url_match(&sub_matches));
+            let dec_key = load_dec_key(&mut term, root_dir)
+                .expect("loading decrption key failed.");
+            let balance_query = getter::BalanceQuery::get_anonymous_balance(&dec_key, api)
+                .expect("Falid to get balance data.");
 
             println!("Decrypted balance: {}", balance_query.decrypted_balance);
             println!("Encrypted balance: {}", balance_query.encrypted_balance_str);
@@ -320,6 +387,16 @@ fn wallet_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .required(false)
             )
         )
+        .subcommand(SubCommand::with_name("anonymous-balance")
+            .about("Get current balance stored in encrypted balances module")
+            .arg(Arg::with_name("url")
+                .short("u")
+                .long("url")
+                .help("Endpoint to connect zerochain nodes")
+                .takes_value(true)
+                .required(false)
+            )
+        )
 }
 
 //
@@ -357,12 +434,12 @@ fn tx_arg_url_match<'a>(matches: &ArgMatches<'a>) -> Url {
 
 fn subcommand_tx<R: Rng>(mut term: term::Term, root_dir: PathBuf, matches: &ArgMatches, rng: &mut R) {
     let res = match matches.subcommand() {
-        ("transfer", Some(sub_matches)) => {
+        ("send", Some(sub_matches)) => {
             let recipient_enc_key = tx_arg_recipient_address_match(&sub_matches);
             let amount = tx_arg_amount_match(&sub_matches);
             let url = tx_arg_url_match(&sub_matches);
 
-            transfer_tx(&mut term, root_dir, &recipient_enc_key[..], amount, url, rng)
+            confidential_transfer_tx(&mut term, root_dir, &recipient_enc_key[..], amount, url, rng)
         },
         ("asset-issue", Some(sub_matches)) => {
             let amount = tx_arg_amount_match(&sub_matches);
@@ -370,7 +447,7 @@ fn subcommand_tx<R: Rng>(mut term: term::Term, root_dir: PathBuf, matches: &ArgM
 
             asset_issue_tx(&mut term, root_dir, amount, url, rng)
         },
-        ("asset-transfer", Some(sub_matches)) => {
+        ("asset-send", Some(sub_matches)) => {
             let recipient_enc_key = tx_arg_recipient_address_match(&sub_matches);
             let amount = tx_arg_amount_match(&sub_matches);
             let url = tx_arg_url_match(&sub_matches);
@@ -382,6 +459,19 @@ fn subcommand_tx<R: Rng>(mut term: term::Term, root_dir: PathBuf, matches: &ArgM
             let url = tx_arg_url_match(&sub_matches);
             let asset_id = wallet_arg_id_match(&sub_matches);
             asset_burn_tx(&mut term, root_dir, asset_id, url, rng)
+        },
+        ("anonymous-send", Some(sub_matches)) => {
+            let recipient_enc_key = tx_arg_recipient_address_match(&sub_matches);
+            let amount = tx_arg_amount_match(&sub_matches);
+            let url = tx_arg_url_match(&sub_matches);
+
+            anonymous_transfer_tx(&mut term, root_dir, &recipient_enc_key[..], amount, url, rng)
+        },
+        ("anonymous-issue", Some(sub_matches)) => {
+            let amount = tx_arg_amount_match(&sub_matches);
+            let url = tx_arg_url_match(&sub_matches);
+
+            annonymous_issue_tx(&mut term, root_dir, amount, url, rng)
         },
         _ => {
             term.error(matches.usage()).unwrap();
@@ -395,7 +485,7 @@ fn subcommand_tx<R: Rng>(mut term: term::Term, root_dir: PathBuf, matches: &ArgM
 fn tx_commands_definition<'a, 'b>() -> App<'a, 'b> {
     SubCommand::with_name(TX_COMMAND)
         .about("transaction operations")
-        .subcommand(SubCommand::with_name("transfer")
+        .subcommand(SubCommand::with_name("send")
             .about("Submit a transaction to zerochain nodes in order to call confidential_transfer function in encrypted-balances module.")
             .arg(Arg::with_name("amount")
                 .short("a")
@@ -436,7 +526,7 @@ fn tx_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .required(false)
             )
         )
-        .subcommand(SubCommand::with_name("asset-transfer")
+        .subcommand(SubCommand::with_name("asset-send")
             .about("Submit a transaction to zerochain nodes in order to call confidential_transfer function in encrypted-assets module.")
             .arg(Arg::with_name("amount")
                 .short("a")
@@ -484,6 +574,47 @@ fn tx_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .required(false)
             )
         )
+        .subcommand(SubCommand::with_name("anonymous-send")
+            .about("Submit a transaction to zerochain nodes in order to call anonymous_transfer function in encrypted-balances module.")
+            .arg(Arg::with_name("amount")
+                .short("a")
+                .long("amount")
+                .help("The coin amount for the anonymous transfer.")
+                .takes_value(true)
+                .required(false)
+            )
+            .arg(Arg::with_name("recipient-address")
+                .short("to")
+                .long("recipient-address")
+                .help("Recipient's SS58-encoded address")
+                .takes_value(true)
+                .required(false)
+            )
+            .arg(Arg::with_name("url")
+                .short("u")
+                .long("url")
+                .help("Endpoint to connect zerochain nodes")
+                .takes_value(true)
+                .required(false)
+            )
+        )
+        .subcommand(SubCommand::with_name("anonymous-issue")
+            .about("Submit a transaction in order to call issue function in anonymous-balances module.")
+            .arg(Arg::with_name("amount")
+                .short("a")
+                .long("amount")
+                .help("The issued coin amount")
+                .takes_value(true)
+                .required(false)
+            )
+            .arg(Arg::with_name("url")
+                .short("u")
+                .long("url")
+                .help("Endpoint to connect zerochain nodes")
+                .takes_value(true)
+                .required(false)
+            )
+        )
 }
 
 //
@@ -512,51 +643,15 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
             let amount = tx_arg_amount_match(&sub_matches);
             let url = tx_arg_url_match(&sub_matches);
 
-            println!("Preparing paramters...");
+            transfer_tx_for_debug(&seed[..], &recipient_enc_key[..], amount, url, rng).unwrap();
+        },
+        ("anonymous-send", Some(sub_matches)) => {
+            let seed = debug_arg_seed_match(&sub_matches);
+            let recipient_enc_key = tx_arg_recipient_address_match(&sub_matches);
+            let amount = tx_arg_amount_match(&sub_matches);
+            let url = tx_arg_url_match(&sub_matches);
 
-            let api = Api::init(url);
-
-            let proving_key = get_pk(PROVING_KEY_PATH).unwrap();
-            let prepared_vk = get_vk(VERIFICATION_KEY_PATH).unwrap();
-
-            let fee_str = api.get_storage("EncryptedBalances", "TransactionBaseFee", None)
-                .expect("should be fetched TransactionBaseFee from ConfTransfer module of Zerochain.");
-            let fee = hexstr_to_u64(fee_str) as u32;
-
-            let spending_key = SpendingKey::from_seed(&seed[..]);
-
-            let dec_key = ProofGenerationKey::<Bls12>::from_spending_key(&spending_key, &PARAMS)
-                .into_decryption_key()
-                .expect("should be generated decryption key from seed.");
-
-            let balance_query = BalanceQuery::get_encrypted_balance(&dec_key, api.clone());
-            let remaining_balance = balance_query.decrypted_balance - amount - fee;
-            assert!(balance_query.decrypted_balance >= amount + fee, "Not enough balance you have");
-
-            let recipient_account_id = EncryptionKey::<Bls12>::read(&mut &recipient_enc_key[..], &PARAMS)
-                .expect("should be casted to EncryptionKey<Bls12> type.");
-            let encrypted_balance = elgamal::Ciphertext::read(&mut &balance_query.encrypted_balance[..], &*PARAMS)
-                .expect("should be casted to Ciphertext type.");
-
-            println!("Computing zk proof...");
-            let tx = Transaction::gen_tx(
-                amount,
-                remaining_balance,
-                &proving_key,
-                &prepared_vk,
-                &recipient_account_id,
-                &spending_key,
-                encrypted_balance,
-                rng,
-                fee
-                )
-            .expect("fails to generate the tx");
-
-            println!("Start submitting a transaction to Zerochain...");
-
-            submit_confidential_transfer(&tx, &api, rng);
-
-            println!("Remaining balance is {}", remaining_balance);
+            anonymous_transfer_tx_for_debug(&seed[..], &recipient_enc_key[..], amount, url, rng).unwrap();
         },
         ("print-tx", Some(sub_matches)) => {
             println!("Generate transaction...");
@@ -564,8 +659,8 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
             let sender_seed = hex::decode(sub_matches.value_of("sender-privatekey").unwrap()).unwrap();
             let recipient_seed  = hex::decode(sub_matches.value_of("recipient-privatekey").unwrap()).unwrap();
 
-            let sender_address = get_address(&sender_seed[..]).unwrap();
-            let recipient_address = get_address(&recipient_seed[..]).unwrap();
+            let sender_address = getter::address(&sender_seed[..]).unwrap();
+            let recipient_address = getter::address(&recipient_seed[..]).unwrap();
 
             println!("Private Key(Sender): 0x{}\nAddress(Sender): 0x{}\n",
                 HexDisplay::from(&sender_seed),
@@ -577,30 +672,11 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
                 HexDisplay::from(&recipient_address),
             );
 
-            let pk_path = Path::new(sub_matches.value_of("proving-key-path").unwrap());
-            let vk_path = Path::new(sub_matches.value_of("verification-key-path").unwrap());
-
-            let pk_file = File::open(&pk_path)
-                .map_err(|why| format!("couldn't open {}: {}", pk_path.display(), why)).unwrap();
-            let vk_file = File::open(&vk_path)
-                .map_err(|why| format!("couldn't open {}: {}", vk_path.display(), why)).unwrap();
-
-            let mut reader_pk = BufReader::new(pk_file);
-            let mut reader_vk = BufReader::new(vk_file);
-
-            let mut buf_pk = vec![];
-            reader_pk.read_to_end(&mut buf_pk)
-                .map_err(|why| format!("couldn't read {}: {}", pk_path.display(), why)).unwrap();
-
-            let mut buf_vk = vec![];
-            reader_vk.read_to_end(&mut buf_vk)
-                .map_err(|why| format!("couldn't read {}: {}", vk_path.display(), why)).unwrap();
-
+            let pk_path = sub_matches.value_of("proving-key-path").unwrap();
+            let vk_path = sub_matches.value_of("verification-key-path").unwrap();
 
             let amount_str = sub_matches.value_of("amount").unwrap();
             let amount: u32 = amount_str.parse().unwrap();
-            // let fee_str = sub_matches.value_of("fee").unwrap();
-            // let fee: u32 = fee_str.parse().unwrap();
             let fee = 1 as u32;
 
             let balance_str = sub_matches.value_of("balance").unwrap();
@@ -608,30 +684,32 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
 
             println!("Transaction >>");
 
-            let rng = &mut OsRng::new().expect("should be able to construct RNG");
-
-            let proving_key = Parameters::<Bls12>::read(&mut &buf_pk[..], true).unwrap();
-            let prepared_vk = PreparedVerifyingKey::<Bls12>::read(&mut &buf_vk[..]).unwrap();
-
             let address_recipient = EncryptionKey::<Bls12>::from_seed(&recipient_seed[..], &PARAMS).unwrap();
 
             let ciphertext_balance_a = sub_matches.value_of("encrypted-balance").unwrap();
             let ciphertext_balance_v = hex::decode(ciphertext_balance_a).unwrap();
-            let ciphertext_balance = elgamal::Ciphertext::read(&mut &ciphertext_balance_v[..], &*PARAMS).unwrap();
+            let ciphertext_balance = vec![elgamal::Ciphertext::read(&mut &ciphertext_balance_v[..], &*PARAMS).unwrap()];
 
             let remaining_balance = balance - amount - fee;
 
-            let tx = Transaction::gen_tx(
-                            amount,
-                            remaining_balance,
-                            &proving_key,
-                            &prepared_vk,
-                            &address_recipient,
-                            &SpendingKey::<Bls12>::from_seed(&sender_seed[..]),
-                            ciphertext_balance,
-                            rng,
-                            fee
-                    ).expect("fails to generate the tx");
+            use scrypto::jubjub::edwards;
+            let g_epoch_vec = hex::decode("0953f47325251a2f479c25527df6d977925bebafde84423b20ae6c903411665a").unwrap();
+            let g_epoch = edwards::Point::read(&g_epoch_vec[..], &*PARAMS).unwrap().as_prime_order(&*PARAMS).unwrap();
+
+            let tx = KeyContext::read_from_path(pk_path, vk_path)
+                .unwrap()
+                .gen_proof(
+                    amount,
+                    fee,
+                    remaining_balance,
+                    0, 0,
+                    &SpendingKey::<Bls12>::from_seed(&sender_seed[..]),
+                    MultiEncKeys::<Bls12, Confidential>::new(address_recipient.clone()),
+                    &ciphertext_balance,
+                    g_epoch,
+                    rng,
+                    &*PARAMS
+                ).expect("fails to generate the tx");
 
             println!(
                 "
@@ -643,22 +721,25 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
                 \nrvk(Alice): 0x{}
                 \nrsk(Alice): 0x{}
                 \nEncrypted fee by sender: 0x{}
+                \nright_randomness: 0x{}
+                \nNonce:  0x{}
                 ",
                 HexDisplay::from(&&tx.proof[..] as &dyn AsBytesRef),
-                HexDisplay::from(&tx.address_sender as &dyn AsBytesRef),
-                HexDisplay::from(&tx.address_recipient as &dyn AsBytesRef),
-                HexDisplay::from(&tx.enc_amount_sender as &dyn AsBytesRef),
-                HexDisplay::from(&tx.enc_amount_recipient as &dyn AsBytesRef),
+                HexDisplay::from(&tx.enc_key_sender as &dyn AsBytesRef),
+                HexDisplay::from(&tx.enc_key_recipient as &dyn AsBytesRef),
+                HexDisplay::from(&tx.left_amount_sender as &dyn AsBytesRef),
+                HexDisplay::from(&tx.left_amount_recipient as &dyn AsBytesRef),
                 HexDisplay::from(&tx.rvk as &dyn AsBytesRef),
                 HexDisplay::from(&tx.rsk as &dyn AsBytesRef),
-                HexDisplay::from(&tx.enc_fee as &dyn AsBytesRef),
+                HexDisplay::from(&tx.left_fee as &dyn AsBytesRef),
+                HexDisplay::from(&tx.right_randomness as &dyn AsBytesRef),
+                HexDisplay::from(&tx.nonce as &dyn AsBytesRef)
             );
         },
         ("balance", Some(sub_matches)) => {
-            println!("Getting encrypted balance from zerochain");
-            // let url = Url::Custom("ws://0.0.0.0:9944".to_string());
-            // let api = Api::init(url);
-            let api = Api::init(Url::Local);
+            println!("Getting encrypted balance...");
+
+            let api = Api::init(tx_arg_url_match(&sub_matches));
             let decr_key_vec = hex::decode(sub_matches.value_of("decryption-key")
                 .expect("Decryption key parameter is required; qed"))
                 .expect("should be decoded to hex.");
@@ -666,7 +747,8 @@ fn subcommand_debug<R: Rng>(mut term: term::Term, matches: &ArgMatches, rng: &mu
             let dec_key = DecryptionKey::read(&mut &decr_key_vec[..])
                 .expect("Reading decryption key faild.");
 
-            let balance_query = BalanceQuery::get_encrypted_balance(&dec_key, api);
+            let balance_query = getter::BalanceQuery::get_encrypted_balance(&dec_key, api)
+                .expect("Falid to get balance data.");
 
             println!("Decrypted balance: {}", balance_query.decrypted_balance);
             println!("Encrypted balance: {}", balance_query.encrypted_balance_str);
@@ -719,6 +801,40 @@ fn debug_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .required(false)
             )
         )
+        .subcommand(SubCommand::with_name("anonymous-send")
+            .about("(Debug) Submit extrinsic to the substrate nodes")
+            .arg(Arg::with_name("amount")
+                .short("a")
+                .long("amount")
+                .help("The coin amount for the confidential transfer. (default: 10)")
+                .takes_value(true)
+                .required(false)
+                .default_value(DEFAULT_AMOUNT)
+            )
+            .arg(Arg::with_name("sender-seed")
+                .short("s")
+                .long("sender-seed")
+                .help("Sender's seed. (default: Alice)")
+                .takes_value(true)
+                .required(false)
+                .default_value(ALICESEED)
+            )
+            .arg(Arg::with_name("recipient-address")
+                .short("t")
+                .long("recipient-address")
+                .help("Recipient's encryption key. (default: Bob)")
+                .takes_value(true)
+                .required(false)
+                .default_value(BOBACCOUNTID)
+            )
+            .arg(Arg::with_name("url")
+                .short("u")
+                .long("url")
+                .help("Endpoint to connect zerochain nodes")
+                .takes_value(true)
+                .required(false)
+            )
+        )
         .subcommand(SubCommand::with_name("print-tx")
             .about("Show transaction components for sending it from a browser")
             .arg(Arg::with_name("proving-key-path")
@@ -728,7 +844,7 @@ fn debug_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .value_name("FILE")
                 .takes_value(true)
                 .required(false)
-                .default_value(TEST_PROVING_KEY_PATH)
+                .default_value(CONF_PK_PATH)
             )
             .arg(Arg::with_name("verification-key-path")
                 .short("v")
@@ -737,7 +853,7 @@ fn debug_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .value_name("FILE")
                 .takes_value(true)
                 .required(false)
-                .default_value(TEST_VERIFICATION_KEY_PATH)
+                .default_value(CONF_VK_PATH)
             )
             .arg(Arg::with_name("amount")
                 .short("a")
@@ -789,6 +905,13 @@ fn debug_commands_definition<'a, 'b>() -> App<'a, 'b> {
                 .takes_value(true)
                 .required(true)
                 .default_value(ALICEDECRYPTIONKEY)
+            )
+            .arg(Arg::with_name("url")
+                .short("u")
+                .long("url")
+                .help("Endpoint to connect zerochain nodes")
+                .takes_value(true)
+                .required(false)
             )
         )
 }

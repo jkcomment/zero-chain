@@ -7,13 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bellman-verifier = { path = "../../core/bellman-verifier", default-features = false }
 pairing = { package = "zerochain-pairing", path = "../../core/pairing", default-features = false }
 zprimitives = { package = "zerochain-primitives", path = "../../core/primitives", default-features = false }
 jubjub = { path = "../../core/jubjub", default-features = false }
 zcrypto = { package = "zerochain-crypto", path = "../../core/crypto", default-features = false }
 keys = { path = "../../core/keys", default-features = false }
 system = { package = "srml-system", path = "../system", default-features = false }
+zk-system = { package = "zk-system", path = "../zk-system", default-features = false }
 
 [features]
 default = ['std']
@@ -25,12 +25,12 @@ std = [
     'runtime-primitives/std',
     'runtime-io/std',
     'pairing/std',
-	'bellman-verifier/std',
 	'zprimitives/std',
 	'jubjub/std',
 	'keys/std',
     'zcrypto/std',
     'system/std',
+    'zk-system/std',
     'serde_derive',
     'serde',
 ]
@@ -42,6 +42,7 @@ zface = { path = "../../zface" }
 test-pairing = { package = "pairing", git = "https://github.com/LayerXcom/librustzcash", branch = "zero-chain" }
 scrypto = { package = "sapling-crypto", git = "https://github.com/LayerXcom/librustzcash", branch = "zero-chain" }
 test-proofs = { package = "zerochain-proofs", path = "../../core/proofs" }
+bellman-verifier = { path = "../../core/bellman-verifier" }
 
 [dependencies.support]
 default_features = false
@@ -85,5 +86,3 @@ version = '1.0'
 [dependencies.serde_derive]
 optional = true
 version = '1.0'
-
-

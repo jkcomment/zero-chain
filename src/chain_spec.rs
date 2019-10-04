@@ -1,25 +1,24 @@
 use primitives::{ed25519, sr25519, Pair, crypto::Ss58Codec};
 use zerochain_runtime::{
-	AccountId, GenesisConfig, ConsensusConfig, TimestampConfig, BalancesConfig,
-	SudoConfig, IndicesConfig, EncryptedBalancesConfig, EncryptedAssetsConfig
+	AccountId, GenesisConfig, ConsensusConfig, TimestampConfig, BalancesConfig, SudoConfig,
+	IndicesConfig, EncryptedBalancesConfig, EncryptedAssetsConfig, ZkSystemConfig,
+	AnonymousBalancesConfig,
 };
-use substrate_service;
 use ed25519::Public as AuthorityId;
-use zprimitives::{
-	PreparedVk,
-	PkdAddress,
-	Ciphertext,
-	SigVerificationKey,
-	ElgamalCiphertext,
-};
+use zprimitives::{EncKey, Ciphertext, SigVerificationKey};
+use bellman_verifier::PreparedVerifyingKey;
 use keys::EncryptionKey;
 use zjubjub::{curve::{FixedGenerators, fs}};
 use zpairing::{bls12_381::Bls12, Field};
 use zcrypto::elgamal;
 use zprimitives::PARAMS;
-use std::path::Path;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use rand::{OsRng, Rng};
+use std::{
+	path::Path,
+	fs::File,
+	io::{BufReader, Read},
+	convert::TryFrom,
+};
 
 // Note this is the URL for the telemetry server
 //const STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/";
@@ -106,7 +105,7 @@ impl Alternative {
 }
 
 fn testnet_genesis(initial_authorities: Vec<AuthorityId>, endowed_accounts: Vec<AccountId>, root_key: AccountId) -> GenesisConfig {
-	let balance_init = alice_balance_init();
+	let balance_init = balance_init();
 	let epoch_init = alice_epoch_init();
 	GenesisConfig {
 		consensus: Some(ConsensusConfig {
@@ -115,7 +114,7 @@ fn testnet_genesis(initial_authorities: Vec<AuthorityId>, endowed_accounts: Vec<
 		}),
 		system: None,
 		timestamp: Some(TimestampConfig {
-			minimum_period: 10,					// 10 second block time.
+			minimum_period: 20,
 		}),
 		indices: Some(IndicesConfig {
 			ids: endowed_accounts.clone(),
@@ -135,46 +134,67 @@ fn testnet_genesis(initial_authorities: Vec<AuthorityId>, endowed_accounts: Vec<
 		encrypted_balances: Some(EncryptedBalancesConfig {
 			encrypted_balance: vec![balance_init.clone()],
 			last_rollover: vec![epoch_init],
-			epoch_length: 1,
 			transaction_base_fee: 1,
-			verifying_key: get_pvk(),
+			_genesis_phantom_data: Default::default(),
 		}),
 		encrypted_assets: Some(EncryptedAssetsConfig {
-			encrypted_balance: vec![((0, balance_init.0), balance_init.1)],
+			encrypted_balance: vec![((0, balance_init.clone().0), balance_init.clone().1)],
 			last_rollover: vec![((0, epoch_init.0), epoch_init.1)],
-            epoch_length: vec![(0, 1)],
-            transaction_base_fee: vec![(0, 1)],
 			_genesis_phantom_data: Default::default(),
+		}),
+		anonymous_balances: Some(AnonymousBalancesConfig {
+			encrypted_balance: init_anonymous_balances(),
+			last_rollover: vec![epoch_init],
+			enc_key_set: init_anonymous_enc_keys(),
+			_genesis_phantom_data: Default::default(),
+		}),
+		zk_system: Some(ZkSystemConfig {
+			last_epoch: 0,
+			epoch_length: 7,
+			nonce_pool: vec![],
+			confidential_vk: get_conf_vk(),
+			anonymous_vk: get_anony_vk()
 		})
 	}
 }
 
-fn get_pvk() -> PreparedVk {
-	let vk_path = Path::new("./zface/verification.params");
+fn get_conf_vk() -> PreparedVerifyingKey<Bls12> {
+	let vk_path = Path::new("./zface/params/conf_vk.dat");
 	let vk_file = File::open(&vk_path).unwrap();
 	let mut vk_reader = BufReader::new(vk_file);
 
 	let mut buf_vk = vec![];
     vk_reader.read_to_end(&mut buf_vk).unwrap();
 
-	PreparedVk::from_slice(&buf_vk[..])
+	PreparedVerifyingKey::<Bls12>::read(&mut &buf_vk[..]).unwrap()
 }
 
-fn alice_balance_init() -> (PkdAddress, Ciphertext) {
+fn get_anony_vk() -> PreparedVerifyingKey<Bls12> {
+	let vk_path = Path::new("./zface/params/anony_vk.dat");
+	let vk_file = File::open(&vk_path).unwrap();
+	let mut vk_reader = BufReader::new(vk_file);
+
+	let mut buf_vk = vec![];
+    vk_reader.read_to_end(&mut buf_vk).unwrap();
+
+	PreparedVerifyingKey::<Bls12>::read(&mut &buf_vk[..]).unwrap()
+}
+
+fn balance_init() -> (EncKey, Ciphertext) {
 	let enc_key = get_alice_enc_key();
 	let alice_value = 10_000 as u32;
 	let p_g = FixedGenerators::Diversifier; // 1 same as NoteCommitmentRandomness;
 
 	// The default balance is not encrypted with randomness.
-	let enc_alice_bal = elgamal::Ciphertext::encrypt(alice_value, fs::Fs::one(), &enc_key, p_g, &PARAMS);
+	let enc_alice_bal = elgamal::Ciphertext::encrypt(alice_value, &fs::Fs::one(), &enc_key, p_g, &PARAMS);
 
-	(PkdAddress::from_encryption_key(&enc_key), Ciphertext::from_ciphertext(&enc_alice_bal))
+	(EncKey::try_from(enc_key).unwrap(), Ciphertext::try_from(enc_alice_bal).unwrap())
 }
 
-fn alice_epoch_init() -> (PkdAddress, u64) {
+fn alice_epoch_init() -> (EncKey, u64) {
 	let enc_key = get_alice_enc_key();
 
-	(PkdAddress::from_encryption_key(&enc_key), 0)
+	(EncKey::try_from(enc_key).unwrap(), 0)
 }
 
 fn get_alice_enc_key() -> EncryptionKey<Bls12> {
@@ -186,4 +206,43 @@ fn get_alice_enc_key() -> EncryptionKey<Bls12> {
 	let enc_key = EncryptionKey::<Bls12>::from_seed(&&alice_seed, &*PARAMS)
 		.expect("should be generated encryption key from seed.");
 	enc_key
+}
+
+
+fn init_typed_enc_keys() -> (Vec<EncryptionKey<Bls12>>, usize) {
+	let rng = &mut OsRng::new().expect("should be able to construct RNG");
+
+	let mut acc = vec![];
+	for _ in 0..100 {
+		let random_seed: [u8; 32] = rng.gen();
+		let enc_key = EncryptionKey::<Bls12>::from_seed(&random_seed, &*PARAMS)
+			.expect("should be generated encryption key from seed.");
+		acc.push(enc_key);
+	}
+	let i = rng.gen_range(0, 100);
+	acc.insert(i, get_alice_enc_key());
+
+	(acc, i)
+}
+
+fn init_anonymous_enc_keys() -> Vec<EncKey> {
+	init_typed_enc_keys().0.into_iter().map(|e| EncKey::try_from(e).unwrap()).collect::<Vec<EncKey>>()
+}
+
+fn init_anonymous_balances() -> Vec<(EncKey, Ciphertext)> {
+	let enc_keys = init_typed_enc_keys();
+	let alice_value = 10_000 as u32;
+	let p_g = FixedGenerators::Diversifier; // 1 same as NoteCommitmentRandomness;
+
+	let mut acc = vec![];
+	for (i, e) in enc_keys.0.iter().enumerate() {
+		if i == enc_keys.1 {
+			let ciphertext = elgamal::Ciphertext::encrypt(alice_value, &fs::Fs::one(), &e, p_g, &PARAMS);
+			acc.push((EncKey::try_from(e.clone()).unwrap(), Ciphertext::try_from(ciphertext).unwrap()))
+		} else {
+			let ciphertext = elgamal::Ciphertext::encrypt(0, &fs::Fs::one(), e, p_g, &PARAMS);
+			acc.push((EncKey::try_from(e.clone()).unwrap(), Ciphertext::try_from(ciphertext).unwrap()))
+		}
+	}
+	acc
 }

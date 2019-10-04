@@ -83,7 +83,8 @@ use srml_support::{storage, StorageValue, StorageMap, Parameter, decl_module, de
 	decl_storage, for_each_tuple};
 use safe_mix::TripletMix;
 use parity_codec::{Encode, Decode};
-use zprimitives::SigVk;
+use zprimitives::{SigVk, IntoXY};
+use pairing::bls12_381::Bls12;
 
 #[cfg(any(feature = "std", test))]
 use runtime_io::{twox_128, TestExternalities, Blake2Hasher};
@@ -165,7 +166,7 @@ pub trait Trait: 'static + Eq + Clone {
 		Parameter + Member + MaybeSerializeDebugButNotDeserialize + Default + traits::Digest<Hash = Self::Hash>;
 
 	/// The user account identifier type for the runtime.
-	type AccountId: SigVk + Parameter + Member + MaybeSerializeDebug + MaybeDisplay + Ord + Default;
+	type AccountId: SigVk + IntoXY<Bls12> + Parameter + Member + MaybeSerializeDebug + MaybeDisplay + Ord + Default;
 
 	/// The verification key for user account's signature
 	type SigVerificationKey: Parameter + Member + MaybeSerializeDebug + MaybeDisplay + Ord + Default;
@@ -316,7 +317,7 @@ decl_storage! {
 		/// Random seed of the current block.
 		RandomSeed get(random_seed) build(|_| T::Hash::default()): T::Hash;
 		/// The current block number being processed. Set by `execute_block`.
-		Number get(block_number) build(|_| T::BlockNumber::sa(1u64)): T::BlockNumber;
+		pub Number get(block_number) build(|_| T::BlockNumber::sa(1u64)): T::BlockNumber;
 		/// Hash of the previous block.
 		ParentHash get(parent_hash) build(|_| hash69()): T::Hash;
 		/// Extrinsics root of the current block, also part of the block header.

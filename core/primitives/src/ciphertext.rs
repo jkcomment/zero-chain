@@ -1,35 +1,75 @@
-use crate::PARAMS;
-use zcrypto::elgamal;
-use pairing::bls12_381::Bls12;
-use jubjub::curve::JubjubBls12;
-
 #[cfg(feature = "std")]
-use ::std::{vec::Vec, fmt, write};
+use ::std::vec::Vec;
 #[cfg(not(feature = "std"))]
 use crate::std::vec::Vec;
-
+use crate::{PARAMS, LeftCiphertext, RightCiphertext};
+use zcrypto::elgamal;
+use pairing::{
+    bls12_381::Bls12,
+    io
+};
 use parity_codec::{Encode, Decode};
-#[cfg(feature = "std")]
-use substrate_primitives::hexdisplay::AsBytesRef;
+use core::convert::{TryInto, TryFrom};
 
 #[derive(Eq, PartialEq, Clone, Default, Encode, Decode)]
 #[cfg_attr(feature = "std", derive(Debug, Serialize, Deserialize))]
 pub struct Ciphertext(Vec<u8>);
 
-pub trait ElgamalCiphertext {
-    fn into_ciphertext(&self) -> Option<elgamal::Ciphertext<Bls12>>;
-    fn from_ciphertext(ciphertext: &elgamal::Ciphertext<Bls12>) -> Self;
+impl TryFrom<elgamal::Ciphertext<Bls12>> for Ciphertext {
+    type Error = io::Error;
+
+    fn try_from(point: elgamal::Ciphertext<Bls12>) -> Result<Self, io::Error> {
+        let mut writer = [0u8; 64];
+        point.write(&mut writer[..])?;
+
+        Ok(Ciphertext(writer.to_vec()))
+    }
 }
 
-impl ElgamalCiphertext for Ciphertext {
-    fn into_ciphertext(&self) -> Option<elgamal::Ciphertext<Bls12>> {
-        elgamal::Ciphertext::read(&mut &self.0[..], &PARAMS as &JubjubBls12).ok()
-    }
+impl TryFrom<&elgamal::Ciphertext<Bls12>> for Ciphertext {
+    type Error = io::Error;
 
-    fn from_ciphertext(ciphertext: &elgamal::Ciphertext<Bls12>) -> Self {
+    fn try_from(point: &elgamal::Ciphertext<Bls12>) -> Result<Self, io::Error> {
         let mut writer = [0u8; 64];
-        ciphertext.write(&mut writer[..]).unwrap();
-        Ciphertext(writer.to_vec())
+        point.write(&mut writer[..])?;
+
+        Ok(Ciphertext(writer.to_vec()))
+    }
+}
+
+impl TryFrom<Ciphertext> for elgamal::Ciphertext<Bls12> {
+    type Error = io::Error;
+
+    fn try_from(ct: Ciphertext) -> Result<Self, io::Error> {
+        elgamal::Ciphertext::read(&mut &ct.0[..], &*PARAMS)
+    }
+}
+
+impl TryFrom<&Ciphertext> for elgamal::Ciphertext<Bls12> {
+    type Error = io::Error;
+
+    fn try_from(ct: &Ciphertext) -> Result<Self, io::Error> {
+        elgamal::Ciphertext::read(&mut &ct.0[..], &*PARAMS)
+    }
+}
+
+impl TryFrom<Ciphertext> for LeftCiphertext {
+    type Error = io::Error;
+
+    fn try_from(ct: Ciphertext) -> Result<LeftCiphertext, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(ct)?
+            .left
+            .try_into()
+    }
+}
+
+impl TryFrom<Ciphertext> for RightCiphertext {
+    type Error = io::Error;
+
+    fn try_from(ct: Ciphertext) -> Result<RightCiphertext, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(ct)?
+            .right
+            .try_into()
     }
 }
 
@@ -37,116 +77,120 @@ impl Ciphertext {
     pub fn from_slice(slice: &[u8]) -> Self {
         Ciphertext(slice.to_vec())
     }
-}
 
-impl Into<Ciphertext> for elgamal::Ciphertext<Bls12> {
-    fn into(self) -> Ciphertext {
-        Ciphertext::from_ciphertext(&self)
+    pub fn from_left_right(left: LeftCiphertext, right: RightCiphertext) -> Result<Self, io::Error> {
+        elgamal::Ciphertext::new(
+            left.try_into()?,
+            right.try_into()?
+        )
+        .try_into()
+        .map_err(|_| io::Error::InvalidData)
+    }
+
+    pub fn add(&self, other: &Self) -> Result<Self, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(self)?
+            .add_no_params(&elgamal::Ciphertext::<Bls12>::try_from(other)?)
+            .try_into()
+    }
+
+    pub fn sub(&self, other: &Self) -> Result<Self, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(self)?
+            .sub_no_params(&elgamal::Ciphertext::<Bls12>::try_from(other)?)
+            .try_into()
     }
 }
 
-#[cfg(feature = "std")]
-impl fmt::Display for Ciphertext {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "0x")?;
-        for i in &self.0 {
-            write!(f, "{:02x}", i)?;
-        }
-        Ok(())
+impl Ciphertext {
+    pub fn left(&self) -> Result<LeftCiphertext, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(self)?
+            .left.try_into()
+    }
+
+    pub fn right(&self) -> Result<RightCiphertext, io::Error> {
+        elgamal::Ciphertext::<Bls12>::try_from(self)?
+            .right.try_into()
+    }
+
+    // TODO: Make constant
+    pub fn zero() ->Self {
+        elgamal::Ciphertext::zero().try_into()
+            .expect("Should valid point.")
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0[..]
     }
 }
-
-#[cfg(feature = "std")]
-impl AsBytesRef for Ciphertext {
-    fn as_bytes_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng, XorShiftRng, Rand};
-    use pairing::PrimeField;
-    use jubjub::curve::{FixedGenerators, JubjubBls12, fs::Fs, ToUniform, JubjubParams};
+    use rand::{Rng, SeedableRng, XorShiftRng};
+    use jubjub::curve::{FixedGenerators, JubjubBls12};
     use parity_codec::{Encode, Decode};
     use keys::EncryptionKey;
 
-    #[test]
-    fn test_ciphertext_into_from() {
-        let rng_sk = &mut XorShiftRng::from_seed([0x3dbe6259, 0x8d313d76, 0x3237db17, 0xe5bc0654]);
-        let mut sk = [0u8; 32];
-        rng_sk.fill_bytes(&mut sk[..]);
-        let sk_fs = Fs::to_uniform(elgamal::elgamal_extend(&sk).as_bytes()).into_repr();
-
+    fn gen_ciphertext() -> elgamal::Ciphertext::<Bls12> {
+        let rng_seed = &mut XorShiftRng::from_seed([0x3dbe6259, 0x8d313d76, 0x3237db17, 0xe5bc0654]);
         let rng_r = &mut XorShiftRng::from_seed([0xbc4f6d47, 0xd62f276d, 0xb963afd3, 0x54558639]);
-        let mut randomness = [0u8; 32];
-        rng_r.fill_bytes(&mut randomness[..]);
-        let r_fs = Fs::to_uniform(elgamal::elgamal_extend(&randomness).as_bytes());
 
         let params = &JubjubBls12::new();
         let p_g = FixedGenerators::Diversifier;
+        let randomness = rng_r.gen();
+        let seed: [u8; 32] = rng_seed.gen();
 
-        let public_key = EncryptionKey(params.generator(p_g).mul(sk_fs, params));
-        let value: u32 = 5 as u32;
+        let enc_key = EncryptionKey::from_seed(&seed[..], params).unwrap();
+        let amount: u32 = 5 as u32;
 
-        let ciphertext1 = elgamal::Ciphertext::encrypt(value, r_fs, &public_key, p_g, params);
+        elgamal::Ciphertext::encrypt(amount, &randomness, &enc_key, p_g, params)
+    }
 
-        let ciphertext_b = Ciphertext::from_ciphertext(&ciphertext1);
-        let ciphertext2 = ciphertext_b.into_ciphertext().unwrap();
+    #[test]
+    fn test_ciphertext_into_from() {
+        let ciphertext_from = gen_ciphertext();
+        let ciphertext = Ciphertext::try_from(&ciphertext_from).unwrap();
+        let ciphertext_into = ciphertext.try_into().unwrap();
 
-        assert!(ciphertext1 == ciphertext2);
+        assert!(ciphertext_from == ciphertext_into);
     }
 
     #[test]
     fn test_ciphertext_encode_decode() {
-        let rng_sk = &mut XorShiftRng::from_seed([0x3dbe6259, 0x8d313d76, 0x3237db17, 0xe5bc0654]);
-        let mut sk = [0u8; 32];
-        rng_sk.fill_bytes(&mut sk[..]);
-        let sk_fs = Fs::to_uniform(elgamal::elgamal_extend(&sk).as_bytes()).into_repr();
-
-        let rng_r = &mut XorShiftRng::from_seed([0xbc4f6d47, 0xd62f276d, 0xb963afd3, 0x54558639]);
-        let mut randomness = [0u8; 32];
-        rng_r.fill_bytes(&mut randomness[..]);
-        let r_fs = Fs::to_uniform(elgamal::elgamal_extend(&randomness).as_bytes());
-
-        let params = &JubjubBls12::new();
-        let p_g = FixedGenerators::Diversifier;
-
-        let public_key = EncryptionKey(params.generator(p_g).mul(sk_fs, params));
-        let value: u32 = 5 as u32;
-
-        let ciphertext1 = elgamal::Ciphertext::encrypt(value, r_fs, &public_key, p_g, params);
-        let ciphertext_b = Ciphertext::from_ciphertext(&ciphertext1);
+        let ciphertext = gen_ciphertext();
+        let ciphertext_b = Ciphertext::try_from(&ciphertext).unwrap();
 
         let encoded_cipher = ciphertext_b.encode();
-
         let decoded_cipher = Ciphertext::decode(&mut encoded_cipher.as_slice()).unwrap();
+
         assert_eq!(ciphertext_b, decoded_cipher);
     }
 
     #[test]
     fn test_ciphertext_rw() {
-        let params = &JubjubBls12::new();
-        let p_g = FixedGenerators::Diversifier;
-
-        let rng = &mut XorShiftRng::from_seed([0x3dbe6259, 0x8d313d76, 0x3237db17, 0xe5bc0654]);
-        let sk_fs = Fs::rand(rng);
-        let r_fs = Fs::rand(rng);
-
-        let public_key = EncryptionKey(params.generator(p_g).mul(sk_fs, params));
-        let value = 10 as u32;
-
-        let ciphertext = elgamal::Ciphertext::encrypt(value, r_fs, &public_key, p_g, params);
+        let ciphertext = gen_ciphertext();
 
         let mut buf = [0u8; 64];
         ciphertext.write(&mut &mut buf[..]).unwrap();
 
-        let ciphertext_a = Ciphertext(buf.to_vec());
-        let ciphertext_b = Ciphertext::from_ciphertext(&ciphertext);
+        let ciphertext_a = Ciphertext::from_slice(&buf[..]);
+        let ciphertext_b = Ciphertext::try_from(&ciphertext).unwrap();
 
         assert_eq!(ciphertext_a, ciphertext_b);
     }
-}
 
+    #[test]
+    fn test_from_left_right() {
+        let ciphertext = gen_ciphertext();
+
+        let mut buf = [0u8; 64];
+        ciphertext.write(&mut &mut buf[..]).unwrap();
+
+        let left = LeftCiphertext::from_slice(&buf[..32]);
+        let right = RightCiphertext::from_slice(&buf[32..]);
+
+        let ciphertext_from = Ciphertext::from_left_right(left, right).unwrap();
+        let ciphertext2 = ciphertext_from.try_into().unwrap();
+
+        assert!(ciphertext == ciphertext2);
+    }
+}

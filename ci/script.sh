@@ -16,11 +16,16 @@ rustup --version
 cargo --version
 
 case $TARGET in
-	"native")
+	"native1")
 		sudo apt-get -y update
 		sudo apt-get install -y cmake pkg-config libssl-dev
+		cargo test --all --release --exclude zerochain-pairing --exclude jubjub --exclude encrypted-balances --exclude encrypted-assets
+		;;
 
-		cargo test --all --release --locked --exclude zerochain-pairing jubjub
+	"native2")
+		sudo apt-get -y update
+		sudo apt-get install -y cmake pkg-config libssl-dev
+		cargo test --release -p zerochain-pairing -p jubjub -p encrypted-balances -p encrypted-assets
 		;;
 
 	"wasm")

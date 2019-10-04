@@ -1,6 +1,10 @@
-pub mod transfer;
+pub mod confidential_transfer;
+pub mod anonymous_transfer;
+pub mod anonimity_set;
+mod range_check;
+mod utils;
 pub mod test;
-pub mod mimc;
 
-pub use self::transfer::Transfer;
+pub use self::confidential_transfer::ConfidentialTransfer;
+pub use self::anonymous_transfer::AnonymousTransfer;
 pub use self::test::TestConstraintSystem;
